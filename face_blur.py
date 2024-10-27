@@ -21,45 +21,68 @@ def detect_faces(img):
     
     face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
     face_cascade_alt = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_alt.xml')
-    face_cascade_alt2 = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_alt2.xml')
     eye_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_eye.xml')
     
-    # זיהוי פנים עם פרמטרים מותאמים
-    faces1 = face_cascade.detectMultiScale(
-        gray,
-        scaleFactor=1.05,
-        minNeighbors=3,
-        minSize=(20, 20),
-        flags=cv2.CASCADE_SCALE_IMAGE
-    )
+    all_faces = []
+    angles = [-15, 0, 15]  # פחות זוויות לבדיקה
     
-    faces2 = face_cascade_alt.detectMultiScale(
-        gray,
-        scaleFactor=1.05,
-        minNeighbors=3,
-        minSize=(20, 20),
-        flags=cv2.CASCADE_SCALE_IMAGE
-    )
+    height, width = gray.shape
+    center = (width // 2, height // 2)
     
-    faces3 = face_cascade_alt2.detectMultiScale(
-        gray,
-        scaleFactor=1.05,
-        minNeighbors=3,
-        minSize=(20, 20),
-        flags=cv2.CASCADE_SCALE_IMAGE
-    )
+    # פרמטרים מותאמים לביצועים טובים יותר
+    scale_factors = [1.1]  # רק ערך אחד
+    min_neighbors_options = [4]  # רק ערך אחד
     
-    # איחוד כל הזיהויים
-    all_faces = np.vstack([faces1, faces2, faces3]) if len(faces1) and len(faces2) and len(faces3) else \
-                np.vstack([faces1, faces2]) if len(faces1) and len(faces2) else \
-                np.vstack([faces1, faces3]) if len(faces1) and len(faces3) else \
-                np.vstack([faces2, faces3]) if len(faces2) and len(faces3) else \
-                faces1 if len(faces1) else faces2 if len(faces2) else faces3
+    for angle in angles:
+        if angle != 0:
+            M = cv2.getRotationMatrix2D(center, angle, 1.0)
+            rotated_gray = cv2.warpAffine(gray, M, (width, height))
+        else:
+            rotated_gray = gray
+        
+        # זיהוי עם שני המסווגים העיקריים
+        for cascade in [face_cascade, face_cascade_alt]:
+            faces = cascade.detectMultiScale(
+                rotated_gray,
+                scaleFactor=1.1,
+                minNeighbors=4,
+                minSize=(30, 30),
+                maxSize=(width//2, height//2),
+                flags=cv2.CASCADE_SCALE_IMAGE
+            )
+            
+            if len(faces):
+                if angle != 0:
+                    for i, (x, y, w, h) in enumerate(faces):
+                        corners = np.array([
+                            [x, y],
+                            [x + w, y],
+                            [x, y + h],
+                            [x + w, y + h]
+                        ])
+                        
+                        M_inv = cv2.getRotationMatrix2D(center, -angle, 1.0)
+                        rotated_corners = []
+                        for corner in corners:
+                            point = np.array([corner[0], corner[1], 1])
+                            rotated_point = np.dot(M_inv, point)
+                            rotated_corners.append(rotated_point[:2])
+                        rotated_corners = np.array(rotated_corners)
+                        
+                        x = int(np.min(rotated_corners[:, 0]))
+                        y = int(np.min(rotated_corners[:, 1]))
+                        w = int(np.max(rotated_corners[:, 0]) - x)
+                        h = int(np.max(rotated_corners[:, 1]) - y)
+                        faces[i] = [x, y, w, h]
+                
+                all_faces.extend(faces)
     
     if len(all_faces) == 0:
         return 0, img
     
-    # הסרת כפילויות
+    all_faces = np.array(all_faces)
+    
+    # הסרת כפילויות עם סף חפיפה מותאם
     final_faces = []
     for (x1, y1, w1, h1) in all_faces:
         is_duplicate = False
@@ -71,27 +94,30 @@ def detect_faces(img):
             area2 = w2 * h2
             smaller_area = min(area1, area2)
             
-            if overlap_area > 0.5 * smaller_area:
+            if overlap_area > 0.4 * smaller_area:
                 is_duplicate = True
                 break
         
         if not is_duplicate:
             final_faces.append([x1, y1, w1, h1])
     
+    # אימות פנים מהיר יותר
     confirmed_faces = []
     for (x, y, w, h) in final_faces:
-        roi_gray = gray[y:y+h, x:x+w]
-        eyes = eye_cascade.detectMultiScale(roi_gray)
-        
         aspect_ratio = float(w) / h
         relative_size = (w * h) / (img.shape[0] * img.shape[1])
         
-        if (0.4 < aspect_ratio < 1.6 and
-            0.005 < relative_size < 0.3 and
-            (len(eyes) >= 1 or relative_size > 0.02)):
-            confirmed_faces.append([x, y, w, h])
+        # בדיקת עיניים רק אם היחסים סבירים
+        if (0.35 < aspect_ratio < 1.65 and 0.003 < relative_size < 0.35):
+            if relative_size > 0.02:  # אם הפנים גדולות מספיק, לא צריך לבדוק עיניים
+                confirmed_faces.append([x, y, w, h])
+            else:
+                roi_gray = gray[y:y+h, x:x+w]
+                eyes = eye_cascade.detectMultiScale(roi_gray)
+                if len(eyes) >= 1:
+                    confirmed_faces.append([x, y, w, h])
     
-    # Blur faces
+    # טשטוש הפנים
     for face in confirmed_faces:
         img = blur_face(img, face)
     
